@@ -1,0 +1,20 @@
+# Entorno virtual
+.venv/
+
+# Archivos temporales de Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Variables privadas
+.env
+.env.local
+
+# Archivos de Jupyter
+.ipynb_checkpoints/
+
+# Archivos de Vercel local
+.vercel/
+
+# Configuración del editor
+.vscode/
