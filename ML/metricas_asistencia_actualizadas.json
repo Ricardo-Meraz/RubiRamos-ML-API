@@ -1,0 +1,7 @@
+{
+    "accuracy": 0.8211920529801324,
+    "precision_inasistencia": 0.6046511627906976,
+    "recall_inasistencia": 0.7222222222222222,
+    "f1_inasistencia": 0.6582278481012658,
+    "roc_auc": 0.8925724637681159
+}

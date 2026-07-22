@@ -45,16 +45,15 @@ feature_columns: list[str] = model_package[
 # ============================================================
 
 app = FastAPI(
-    title="API de predicción de asistencia",
+    title="API de predicción de inasistencia",
     description=(
-        "Predice el riesgo de inasistencia de pacientes "
-        "a citas nutricionales."
+        "Predice la probabilidad de que un paciente "
+        "no asista a una cita nutricional."
     ),
-    version="1.0.0",
+    version="2.0.0",
 )
 
 
-# Permite solicitudes desde la aplicación Next.js.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -74,62 +73,64 @@ app.add_middleware(
 
 class AppointmentPredictionInput(BaseModel):
     age: int = Field(
+        ...,
         ge=0,
         le=120,
+        description=(
+            "Edad del paciente en la fecha de la cita."
+        ),
+        examples=[35],
     )
 
-    gender_female: int = Field(
-        ge=0,
-        le=1,
-    )
-
-    # Se conservan para que la aplicación pueda enviarlos,
-    # pero no son utilizados por el modelo.
-    deposit_paid: int = Field(
-        default=0,
-        ge=0,
-        le=1,
-    )
-
-    deposit_amount: float = Field(
-        default=0,
-        ge=0,
-    )
-
-    day_of_week: int = Field(
+    appointment_month: int = Field(
+        ...,
         ge=1,
-        le=7,
+        le=12,
+        description=(
+            "Mes de la cita, de 1 a 12."
+        ),
+        examples=[7],
     )
 
-    appointment_hour: int = Field(
-        ge=0,
-        le=23,
+    appointment_day_of_month: int = Field(
+        ...,
+        ge=1,
+        le=31,
+        description=(
+            "Día del mes de la cita."
+        ),
+        examples=[15],
     )
 
-    is_saturday: int = Field(
+    previous_completed_percentage: float = Field(
+        ...,
         ge=0,
-        le=1,
+        le=100,
+        description=(
+            "Porcentaje de citas anteriores completadas."
+        ),
+        examples=[75.0],
     )
 
-    previous_completed: int = Field(
+    previous_no_show_percentage: float = Field(
+        ...,
         ge=0,
+        le=100,
+        description=(
+            "Porcentaje de citas anteriores "
+            "a las que el paciente no asistió."
+        ),
+        examples=[25.0],
     )
 
-    previous_no_show: int = Field(
+    previous_cancelled_percentage: float = Field(
+        ...,
         ge=0,
-    )
-
-    previous_cancelled: int = Field(
-        ge=0,
-    )
-
-    previous_appointments: int = Field(
-        ge=0,
-    )
-
-    previous_attendance_rate: float = Field(
-        ge=0,
-        le=1,
+        le=100,
+        description=(
+            "Porcentaje de citas anteriores canceladas."
+        ),
+        examples=[0.0],
     )
 
 
@@ -156,21 +157,79 @@ class AppointmentPredictionOutput(BaseModel):
 
     prediction: str
 
+    target_name: str
+
+    model_name: str
+
+
+# ============================================================
+# FUNCIONES AUXILIARES
+# ============================================================
+
+def validate_historical_percentages(
+    completed_percentage: float,
+    no_show_percentage: float,
+    cancelled_percentage: float,
+) -> None:
+    total_percentage = (
+        completed_percentage
+        + no_show_percentage
+        + cancelled_percentage
+    )
+
+    no_previous_appointments = (
+        completed_percentage == 0
+        and no_show_percentage == 0
+        and cancelled_percentage == 0
+    )
+
+    valid_total = (
+        abs(
+            total_percentage - 100
+        ) <= 0.05
+    )
+
+    if not (
+        no_previous_appointments
+        or valid_total
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Los porcentajes históricos deben sumar "
+                "aproximadamente 100, o los tres deben ser "
+                "0 cuando el paciente no tiene citas previas."
+            ),
+        )
+
 
 # ============================================================
 # RUTA PRINCIPAL
 # ============================================================
 
 @app.get("/")
-def root():
+def root() -> dict[str, Any]:
     return {
-        "service": "Predicción de asistencia",
-        "status": "online",
-        "model": model_package.get(
-            "model_name",
-            "modelo_desconocido",
-        ),
-        "version": "1.0.0",
+        "service":
+            "Predicción de inasistencia",
+
+        "status":
+            "online",
+
+        "model":
+            model_package.get(
+                "model_name",
+                "modelo_desconocido",
+            ),
+
+        "target":
+            model_package.get(
+                "target_column",
+                "inasistencia_cita",
+            ),
+
+        "version":
+            "2.0.0",
     }
 
 
@@ -179,15 +238,39 @@ def root():
 # ============================================================
 
 @app.get("/health")
-def health():
+def health() -> dict[str, Any]:
     return {
-        "success": True,
-        "model_loaded": True,
-        "model_name": model_package.get(
-            "model_name",
-            "modelo_desconocido",
-        ),
-        "feature_columns": feature_columns,
+        "success":
+            True,
+
+        "model_loaded":
+            True,
+
+        "model_name":
+            model_package.get(
+                "model_name",
+                "modelo_desconocido",
+            ),
+
+        "target_column":
+            model_package.get(
+                "target_column",
+                "inasistencia_cita",
+            ),
+
+        "feature_columns":
+            feature_columns,
+
+        "metrics":
+            model_package.get(
+                "metrics",
+                {},
+            ),
+
+        "trained_at_utc":
+            model_package.get(
+                "trained_at_utc",
+            ),
     }
 
 
@@ -201,63 +284,33 @@ def health():
 )
 def predict_attendance(
     input_data: AppointmentPredictionInput,
-):
+) -> AppointmentPredictionOutput:
     try:
-        values = input_data.model_dump()
+        validate_historical_percentages(
+            input_data
+                .previous_completed_percentage,
 
-        previous_completed = int(
-            input_data.previous_completed
+            input_data
+                .previous_no_show_percentage,
+
+            input_data
+                .previous_cancelled_percentage,
         )
 
-        previous_no_show = int(
-            input_data.previous_no_show
+        input_values = (
+            input_data.model_dump()
         )
 
-        previous_cancelled = int(
-            input_data.previous_cancelled
-        )
-
-        previous_appointments = (
-            previous_completed
-            + previous_no_show
-            + previous_cancelled
-        )
-
-        previous_attendance_total = (
-            previous_completed
-            + previous_no_show
-        )
-
-        previous_attendance_rate = (
-            previous_completed
-            / previous_attendance_total
-            if previous_attendance_total > 0
-            else 0.0
-        )
-
-        values.update(
-            {
-                "previous_completed":
-                    previous_completed,
-
-                "previous_no_show":
-                    previous_no_show,
-
-                "previous_cancelled":
-                    previous_cancelled,
-
-                "previous_appointments":
-                    previous_appointments,
-
-                "previous_attendance_rate":
-                    previous_attendance_rate,
-            }
-        )
-
-        # Solamente utiliza las columnas con las que
-        # fue entrenado el modelo.
         features = pd.DataFrame(
-            [values],
+            [
+                {
+                    column:
+                        input_values[column]
+
+                    for column in
+                        feature_columns
+                }
+            ],
             columns=feature_columns,
         )
 
@@ -272,34 +325,22 @@ def predict_attendance(
         if 1 not in model_classes:
             raise RuntimeError(
                 "El modelo no contiene la clase "
-                "de inasistencia."
+                "positiva de inasistencia."
             )
 
-        no_show_class_index = (
+        inasistencia_class_index = (
             model_classes.index(1)
         )
 
-        model_no_show_probability = float(
+        inasistencia_probability = float(
             probabilities[
-                no_show_class_index
+                inasistencia_class_index
             ]
         )
 
-        historical_no_show_probability = (
-            previous_no_show
-            / previous_attendance_total
-            if previous_attendance_total >= 3
-            else 0.0
-        )
-
-        no_show_probability = max(
-            model_no_show_probability,
-            historical_no_show_probability,
-        )
-
-        no_show_probability = min(
+        inasistencia_probability = min(
             max(
-                no_show_probability,
+                inasistencia_probability,
                 0.0,
             ),
             1.0,
@@ -307,11 +348,11 @@ def predict_attendance(
 
         attendance_probability = (
             1.0
-            - no_show_probability
+            - inasistencia_probability
         )
 
-        predicted_no_show = int(
-            no_show_probability >= 0.50
+        predicted_inasistencia = int(
+            inasistencia_probability >= 0.50
         )
 
         risk_level: Literal[
@@ -320,10 +361,10 @@ def predict_attendance(
             "Alto",
         ]
 
-        if no_show_probability >= 0.50:
+        if inasistencia_probability >= 0.50:
             risk_level = "Alto"
 
-        elif no_show_probability >= 0.25:
+        elif inasistencia_probability >= 0.25:
             risk_level = "Medio"
 
         else:
@@ -331,13 +372,13 @@ def predict_attendance(
 
         prediction = (
             "No asistirá"
-            if predicted_no_show == 1
+            if predicted_inasistencia == 1
             else "Sí asistirá"
         )
 
         return AppointmentPredictionOutput(
             no_show_probability=round(
-                no_show_probability,
+                inasistencia_probability,
                 6,
             ),
 
@@ -347,7 +388,7 @@ def predict_attendance(
             ),
 
             no_show_percentage=round(
-                no_show_probability * 100,
+                inasistencia_probability * 100,
                 2,
             ),
 
@@ -359,11 +400,32 @@ def predict_attendance(
             risk_level=risk_level,
 
             predicted_no_show=(
-                predicted_no_show
+                predicted_inasistencia
             ),
 
             prediction=prediction,
+
+            target_name=(
+                "inasistencia_cita"
+            ),
+
+            model_name=model_package.get(
+                "model_name",
+                "modelo_desconocido",
+            ),
         )
+
+    except HTTPException:
+        raise
+
+    except KeyError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Falta una variable requerida "
+                f"por el modelo: {error}"
+            ),
+        ) from error
 
     except Exception as error:
         print(
@@ -375,6 +437,6 @@ def predict_attendance(
             status_code=500,
             detail=(
                 "No se pudo generar la predicción "
-                "de asistencia."
+                "de inasistencia."
             ),
         ) from error
